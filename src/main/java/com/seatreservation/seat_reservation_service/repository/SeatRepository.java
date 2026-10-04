@@ -36,4 +36,16 @@ public interface SeatRepository extends JpaRepository<Seat, SeatId> {
             @Param("showId") UUID showId,
             @Param("seatNumbers") List<String> seatNumbers
     );
+
+    @Query("""
+    SELECT s
+    FROM Seat s
+    WHERE s.id.showId = :showId
+      AND s.id.seatNo IN :seatNumbers
+    ORDER BY s.id.seatNo
+    """)
+    List<Seat> findSeatsForFastCheck(
+            @Param("showId") UUID showId,
+            @Param("seatNumbers") List<String> seatNumbers
+    );
 }

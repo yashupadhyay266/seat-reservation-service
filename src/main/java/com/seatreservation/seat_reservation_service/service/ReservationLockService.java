@@ -4,6 +4,7 @@ import com.seatreservation.seat_reservation_service.dto.request.ReserveSeatReque
 import com.seatreservation.seat_reservation_service.dto.response.ReservationResponse;
 import com.seatreservation.seat_reservation_service.entity.CancellationLockContext;
 import com.seatreservation.seat_reservation_service.exception.InvalidSeatException;
+import com.seatreservation.seat_reservation_service.exception.SeatUnavailableException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
@@ -15,6 +16,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -24,70 +26,301 @@ public class ReservationLockService {
     private final RedissonClient redissonClient;
     private final ReservationTransactionalService transactionalService;
     private final ReservationLookupService reservationLookupService;
+    private final ReservationFastPathService reservationFastPathService;
 
     public ReservationResponse reserve(
             UUID showId,
             String userId,
             ReserveSeatRequest request
     ) {
+
+        log.debug(
+                "Reservation request received showId={} userId={} seats={} idempotencyKey={}",
+                showId,
+                userId,
+                request.seats(),
+                request.idempotencyKey()
+        );
+
+        log.debug(
+                "Checking reservation fast path showId={} userId={} seats={}",
+                showId,
+                userId,
+                request.seats()
+        );
+
+        if (reservationFastPathService.canRejectImmediately(showId, userId, request)) {
+
+            log.debug(
+                    "Reservation rejected by fast path because one or more seats are unavailable showId={} userId={} seats={}",
+                    showId,
+                    userId,
+                    request.seats()
+            );
+
+            throw new SeatUnavailableException(
+                    "One or more requested seats are no longer available"
+            );
+        }
+
+        log.debug(
+                "Reservation passed fast path showId={} userId={} seats={}",
+                showId,
+                userId,
+                request.seats()
+        );
+
         List<String> seats = request.seats()
                 .stream()
                 .map(String::trim)
                 .sorted()
                 .toList();
 
+        log.debug(
+                "Reservation seats normalized and sorted showId={} userId={} seats={}",
+                showId,
+                userId,
+                seats
+        );
+
         if (new HashSet<>(seats).size() != seats.size()) {
-            throw new InvalidSeatException("Duplicate seats are not allowed");
+
+            log.debug(
+                    "Reservation rejected because duplicate seats were requested showId={} userId={} seats={}",
+                    showId,
+                    userId,
+                    seats
+            );
+
+            throw new InvalidSeatException(
+                    "Duplicate seats are not allowed"
+            );
         }
 
         List<RLock> locks = new ArrayList<>();
 
-        locks.add(redissonClient.getLock(
-                "reservation:idempotency:" + userId + ":" + request.idempotencyKey()
-        ));
+        log.debug(
+                "Preparing Redis idempotency lock showId={} userId={} idempotencyKey={}",
+                showId,
+                userId,
+                request.idempotencyKey()
+        );
 
-        locks.add(redissonClient.getLock(
-                "reservation:user:" + showId + ":" + userId
-        ));
+        locks.add(
+                redissonClient.getLock(
+                        "reservation:idempotency:"
+                                + userId
+                                + ":"
+                                + request.idempotencyKey()
+                )
+        );
+
+        log.debug(
+                "Preparing Redis user lock showId={} userId={}",
+                showId,
+                userId
+        );
+
+        locks.add(
+                redissonClient.getLock(
+                        "reservation:user:"
+                                + showId
+                                + ":"
+                                + userId
+                )
+        );
 
         for (String seat : seats) {
-            locks.add(redissonClient.getLock(
-                    "reservation:seat:" + showId + ":" + seat
-            ));
+
+            log.debug(
+                    "Preparing Redis seat lock showId={} userId={} seat={}",
+                    showId,
+                    userId,
+                    seat
+            );
+
+            locks.add(
+                    redissonClient.getLock(
+                            "reservation:seat:"
+                                    + showId
+                                    + ":"
+                                    + seat
+                    )
+            );
         }
 
-        RLock multiLock = redissonClient.getMultiLock(
-                locks.toArray(RLock[]::new)
+        log.debug(
+                "Creating Redis multi-lock showId={} userId={} seats={} lockCount={}",
+                showId,
+                userId,
+                seats,
+                locks.size()
         );
+
+        RLock multiLock =
+                redissonClient.getMultiLock(
+                        locks.toArray(RLock[]::new)
+                );
 
         boolean locked = false;
 
         try {
+
             try {
-                multiLock.lock();
+
+                log.debug(
+                        "Attempting bounded Redis reservation lock showId={} userId={} seats={}",
+                        showId,
+                        userId,
+                        seats
+                );
+
+                boolean acquired =
+                        multiLock.tryLock(
+                                500,
+                                60_000,
+                                TimeUnit.MILLISECONDS
+                        );
+
+                if (!acquired) {
+
+                    log.debug(
+                            "Redis reservation lock not acquired within wait period showId={} userId={} seats={}",
+                            showId,
+                            userId,
+                            seats
+                    );
+
+                    log.debug(
+                            "Rechecking fast path after Redis contention showId={} userId={} seats={}",
+                            showId,
+                            userId,
+                            seats
+                    );
+
+                    if (reservationFastPathService.canRejectImmediately(
+                            showId,
+                            userId,
+                            request
+                    )) {
+
+                        log.debug(
+                                "Reservation rejected after Redis contention because seat is now unavailable showId={} userId={} seats={}",
+                                showId,
+                                userId,
+                                seats
+                        );
+
+                        throw new SeatUnavailableException(
+                                "One or more requested seats are no longer available"
+                        );
+                    }
+
+                    log.debug(
+                            "Seat still appears available after Redis contention. Falling back to PostgreSQL locking showId={} userId={} seats={}",
+                            showId,
+                            userId,
+                            seats
+                    );
+
+                    return transactionalService.reserve(
+                            showId,
+                            userId,
+                            request
+                    );
+                }
+
                 locked = true;
-            } catch (RedisException exception) {
+
+                log.debug(
+                        "Redis reservation lock acquired showId={} userId={} seats={}",
+                        showId,
+                        userId,
+                        seats
+                );
+
+            } catch (InterruptedException exception) {
+
+                Thread.currentThread().interrupt();
+
                 log.warn(
-                        "Redis locking unavailable. Falling back to PostgreSQL locking. showId={}, userId={}",
+                        "Redis reservation lock wait interrupted. Falling back to PostgreSQL locking. showId={} userId={}",
                         showId,
                         userId,
                         exception
                 );
 
-                return transactionalService.reserve(showId, userId, request);
+                return transactionalService.reserve(
+                        showId,
+                        userId,
+                        request
+                );
+
+            } catch (RedisException exception) {
+
+                log.warn(
+                        "Redis locking unavailable. Falling back to PostgreSQL locking. showId={} userId={}",
+                        showId,
+                        userId,
+                        exception
+                );
+
+                return transactionalService.reserve(
+                        showId,
+                        userId,
+                        request
+                );
             }
 
-            return transactionalService.reserve(showId, userId, request);
+            log.debug(
+                    "Executing transactional reservation showId={} userId={} seats={}",
+                    showId,
+                    userId,
+                    seats
+            );
+
+            return transactionalService.reserve(
+                    showId,
+                    userId,
+                    request
+            );
 
         } finally {
+
             if (locked) {
+
+                log.debug(
+                        "Checking Redis reservation lock before release showId={} userId={} seats={}",
+                        showId,
+                        userId,
+                        seats
+                );
+
                 try {
+
                     if (multiLock.isHeldByCurrentThread()) {
+
+                        log.debug(
+                                "Releasing Redis reservation lock showId={} userId={} seats={}",
+                                showId,
+                                userId,
+                                seats
+                        );
+
                         multiLock.unlock();
+
+                        log.debug(
+                                "Redis reservation lock released showId={} userId={} seats={}",
+                                showId,
+                                userId,
+                                seats
+                        );
                     }
+
                 } catch (RedisException exception) {
+
                     log.error(
-                            "Failed to release Redis reservation lock. showId={}, userId={}",
+                            "Failed to release Redis reservation lock. showId={} userId={}",
                             showId,
                             userId,
                             exception
@@ -102,6 +335,18 @@ public class ReservationLockService {
             String userId
     ) {
 
+        log.debug(
+                "Cancellation request received reservationId={} userId={}",
+                reservationId,
+                userId
+        );
+
+        log.debug(
+                "Loading cancellation lock context reservationId={} userId={}",
+                reservationId,
+                userId
+        );
+
         CancellationLockContext context =
                 reservationLookupService
                         .getCancellationContext(
@@ -109,8 +354,23 @@ public class ReservationLockService {
                                 userId
                         );
 
+        log.debug(
+                "Cancellation lock context loaded reservationId={} showId={} userId={} seats={}",
+                reservationId,
+                context.showId(),
+                context.userId(),
+                context.seats()
+        );
+
         List<RLock> locks =
                 new ArrayList<>();
+
+        log.debug(
+                "Preparing Redis cancellation user lock reservationId={} showId={} userId={}",
+                reservationId,
+                context.showId(),
+                context.userId()
+        );
 
         locks.add(
                 redissonClient.getLock(
@@ -124,16 +384,34 @@ public class ReservationLockService {
         context.seats()
                 .stream()
                 .sorted()
-                .forEach(seat ->
-                        locks.add(
-                                redissonClient.getLock(
-                                        "reservation:seat:"
-                                                + context.showId()
-                                                + ":"
-                                                + seat
-                                )
-                        )
-                );
+                .forEach(seat -> {
+
+                    log.debug(
+                            "Preparing Redis cancellation seat lock reservationId={} showId={} userId={} seat={}",
+                            reservationId,
+                            context.showId(),
+                            context.userId(),
+                            seat
+                    );
+
+                    locks.add(
+                            redissonClient.getLock(
+                                    "reservation:seat:"
+                                            + context.showId()
+                                            + ":"
+                                            + seat
+                            )
+                    );
+                });
+
+        log.debug(
+                "Creating Redis cancellation multi-lock reservationId={} showId={} userId={} seats={} lockCount={}",
+                reservationId,
+                context.showId(),
+                userId,
+                context.seats(),
+                locks.size()
+        );
 
         RLock multiLock =
                 redissonClient.getMultiLock(
@@ -146,11 +424,19 @@ public class ReservationLockService {
 
             try {
 
+                log.debug(
+                        "Attempting to acquire Redis cancellation lock reservationId={} showId={} userId={} seats={}",
+                        reservationId,
+                        context.showId(),
+                        userId,
+                        context.seats()
+                );
+
                 multiLock.lock();
 
                 locked = true;
 
-                log.info(
+                log.debug(
                         "Redis cancellation lock acquired reservationId={} showId={} userId={} seats={}",
                         reservationId,
                         context.showId(),
@@ -172,6 +458,14 @@ public class ReservationLockService {
                 );
             }
 
+            log.debug(
+                    "Executing transactional cancellation reservationId={} showId={} userId={} seats={}",
+                    reservationId,
+                    context.showId(),
+                    userId,
+                    context.seats()
+            );
+
             return transactionalService.cancel(
                     reservationId,
                     userId
@@ -181,13 +475,28 @@ public class ReservationLockService {
 
             if (locked) {
 
+                log.debug(
+                        "Checking Redis cancellation lock before release reservationId={} showId={} userId={}",
+                        reservationId,
+                        context.showId(),
+                        userId
+                );
+
                 try {
 
                     if (multiLock.isHeldByCurrentThread()) {
 
+                        log.debug(
+                                "Releasing Redis cancellation lock reservationId={} showId={} userId={} seats={}",
+                                reservationId,
+                                context.showId(),
+                                userId,
+                                context.seats()
+                        );
+
                         multiLock.unlock();
 
-                        log.info(
+                        log.debug(
                                 "Redis cancellation lock released reservationId={}",
                                 reservationId
                         );

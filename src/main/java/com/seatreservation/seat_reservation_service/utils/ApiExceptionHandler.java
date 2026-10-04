@@ -6,6 +6,7 @@ import com.seatreservation.seat_reservation_service.exception.ReservationAccessD
 import com.seatreservation.seat_reservation_service.exception.ReservationConflictException;
 import com.seatreservation.seat_reservation_service.exception.ReservationNotFoundException;
 import com.seatreservation.seat_reservation_service.exception.ReservationStateException;
+import com.seatreservation.seat_reservation_service.exception.SeatUnavailableException;
 import com.seatreservation.seat_reservation_service.exception.ShowNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +15,21 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+
+    @ExceptionHandler(SeatUnavailableException.class)
+    public ResponseEntity<ApiError> handleSeatUnavailable(
+            SeatUnavailableException exception
+    ) {
+
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body(
+                        new ApiError(
+                                "SEAT_UNAVAILABLE",
+                                exception.getMessage()
+                        )
+                );
+    }
 
     @ExceptionHandler(ReservationConflictException.class)
     public ResponseEntity<ApiError> handleConflict(ReservationConflictException exception) {
