@@ -1,0 +1,25 @@
+package com.seatreservation.seat_reservation_service.entity;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Embeddable;
+import lombok.AllArgsConstructor;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
+import java.io.Serializable;
+import java.util.UUID;
+
+@Getter
+@Embeddable
+@EqualsAndHashCode
+@NoArgsConstructor
+@AllArgsConstructor
+public class UserShowBookingId implements Serializable {
+
+    @Column(name = "show_id")
+    private UUID showId;
+
+    @Column(name = "user_id")
+    private String userId;
+}
