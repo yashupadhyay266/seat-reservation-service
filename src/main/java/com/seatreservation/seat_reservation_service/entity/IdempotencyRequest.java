@@ -1,7 +1,12 @@
 package com.seatreservation.seat_reservation_service.entity;
 
 import com.seatreservation.seat_reservation_service.enums.IdempotencyState;
-import jakarta.persistence.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.EmbeddedId;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Table;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;

@@ -1,7 +1,12 @@
 package com.seatreservation.seat_reservation_service.entity;
 
 import com.seatreservation.seat_reservation_service.enums.SeatStatus;
-import jakarta.persistence.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.EmbeddedId;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Table;
 
 import java.util.UUID;
 

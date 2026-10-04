@@ -2,6 +2,7 @@ package com.seatreservation.seat_reservation_service.service;
 
 import com.seatreservation.seat_reservation_service.dto.request.ReserveSeatRequest;
 import com.seatreservation.seat_reservation_service.dto.response.ReservationResponse;
+import com.seatreservation.seat_reservation_service.entity.CancellationLockContext;
 import com.seatreservation.seat_reservation_service.exception.InvalidSeatException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +23,7 @@ public class ReservationLockService {
 
     private final RedissonClient redissonClient;
     private final ReservationTransactionalService transactionalService;
+    private final ReservationLookupService reservationLookupService;
 
     public ReservationResponse reserve(
             UUID showId,
@@ -88,6 +90,114 @@ public class ReservationLockService {
                             "Failed to release Redis reservation lock. showId={}, userId={}",
                             showId,
                             userId,
+                            exception
+                    );
+                }
+            }
+        }
+    }
+
+    public ReservationResponse cancel(
+            UUID reservationId,
+            String userId
+    ) {
+
+        CancellationLockContext context =
+                reservationLookupService
+                        .getCancellationContext(
+                                reservationId,
+                                userId
+                        );
+
+        List<RLock> locks =
+                new ArrayList<>();
+
+        locks.add(
+                redissonClient.getLock(
+                        "reservation:user:"
+                                + context.showId()
+                                + ":"
+                                + context.userId()
+                )
+        );
+
+        context.seats()
+                .stream()
+                .sorted()
+                .forEach(seat ->
+                        locks.add(
+                                redissonClient.getLock(
+                                        "reservation:seat:"
+                                                + context.showId()
+                                                + ":"
+                                                + seat
+                                )
+                        )
+                );
+
+        RLock multiLock =
+                redissonClient.getMultiLock(
+                        locks.toArray(RLock[]::new)
+                );
+
+        boolean locked = false;
+
+        try {
+
+            try {
+
+                multiLock.lock();
+
+                locked = true;
+
+                log.info(
+                        "Redis cancellation lock acquired reservationId={} showId={} userId={} seats={}",
+                        reservationId,
+                        context.showId(),
+                        userId,
+                        context.seats()
+                );
+
+            } catch (RedisException exception) {
+
+                log.warn(
+                        "Redis unavailable during cancellation. Falling back to PostgreSQL locking. reservationId={}",
+                        reservationId,
+                        exception
+                );
+
+                return transactionalService.cancel(
+                        reservationId,
+                        userId
+                );
+            }
+
+            return transactionalService.cancel(
+                    reservationId,
+                    userId
+            );
+
+        } finally {
+
+            if (locked) {
+
+                try {
+
+                    if (multiLock.isHeldByCurrentThread()) {
+
+                        multiLock.unlock();
+
+                        log.info(
+                                "Redis cancellation lock released reservationId={}",
+                                reservationId
+                        );
+                    }
+
+                } catch (RedisException exception) {
+
+                    log.error(
+                            "Failed to release Redis cancellation lock reservationId={}",
+                            reservationId,
                             exception
                     );
                 }
