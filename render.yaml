@@ -14,7 +14,6 @@ services:
     dockerfilePath: ./docker/Dockerfile
     dockerContext: .
     healthCheckPath: /actuator/health/readiness
-    maxShutdownDelaySeconds: 30
 
     envVars:
       - key: APP_ENV
