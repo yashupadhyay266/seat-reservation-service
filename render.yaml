@@ -1,0 +1,47 @@
+services:
+  - type: keyvalue
+    name: seat-reservation-redis
+    plan: free
+    region: singapore
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+  - type: web
+    name: seat-reservation-service
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    healthCheckPath: /actuator/health/readiness
+    maxShutdownDelaySeconds: 30
+
+    envVars:
+      - key: APP_ENV
+        value: render
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: seat-reservation-postgres
+          property: connectionString
+
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: seat-reservation-redis
+          property: connectionString
+
+      - key: JWT_SECRET
+        generateValue: true
+
+      - key: JAVA_TOOL_OPTIONS
+        value: -XX:MaxRAMPercentage=70.0 -XX:+UseSerialGC
+
+databases:
+  - name: seat-reservation-postgres
+    plan: free
+    region: singapore
+    postgresMajorVersion: "17"
+    databaseName: seatdb
+    user: seatuser
+    ipAllowList: []

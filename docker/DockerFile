@@ -3,7 +3,6 @@ FROM maven:3.9.11-eclipse-temurin-21 AS build
 WORKDIR /workspace
 
 COPY pom.xml .
-
 COPY src ./src
 
 RUN mvn -q clean package -DskipTests
@@ -18,7 +17,10 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=build /workspace/target/seat-reservation-service-0.0.1-SNAPSHOT.jar app.jar
+COPY docker/render-entrypoint.sh /app/render-entrypoint.sh
+
+RUN chmod +x /app/render-entrypoint.sh
 
 EXPOSE 8080
 
-ENTRYPOINT ["java","-jar","/app/app.jar"]
+ENTRYPOINT ["/app/render-entrypoint.sh"]
