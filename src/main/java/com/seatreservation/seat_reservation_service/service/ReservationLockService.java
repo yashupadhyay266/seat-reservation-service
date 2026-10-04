@@ -330,185 +330,58 @@ public class ReservationLockService {
         }
     }
 
-    public ReservationResponse cancel(
-            UUID reservationId,
-            String userId
-    ) {
+    public ReservationResponse cancel(UUID reservationId, String userId) {
+        log.debug("Cancellation request received reservationId={} userId={}", reservationId, userId);
 
-        log.debug(
-                "Cancellation request received reservationId={} userId={}",
-                reservationId,
-                userId
+        CancellationLockContext context = reservationLookupService.getCancellationContext(reservationId, userId);
+        log.debug("Cancellation lock context loaded reservationId={} showId={} userId={} seats={}", reservationId, context.showId(), context.userId(), context.seats());
+
+        List<RLock> locks = new ArrayList<>();
+        locks.add(redissonClient.getLock("reservation:user:" + context.showId() + ":" + context.userId()));
+
+        context.seats().stream().sorted().forEach(seat ->
+                locks.add(redissonClient.getLock("reservation:seat:" + context.showId() + ":" + seat))
         );
 
-        log.debug(
-                "Loading cancellation lock context reservationId={} userId={}",
-                reservationId,
-                userId
-        );
-
-        CancellationLockContext context =
-                reservationLookupService
-                        .getCancellationContext(
-                                reservationId,
-                                userId
-                        );
-
-        log.debug(
-                "Cancellation lock context loaded reservationId={} showId={} userId={} seats={}",
-                reservationId,
-                context.showId(),
-                context.userId(),
-                context.seats()
-        );
-
-        List<RLock> locks =
-                new ArrayList<>();
-
-        log.debug(
-                "Preparing Redis cancellation user lock reservationId={} showId={} userId={}",
-                reservationId,
-                context.showId(),
-                context.userId()
-        );
-
-        locks.add(
-                redissonClient.getLock(
-                        "reservation:user:"
-                                + context.showId()
-                                + ":"
-                                + context.userId()
-                )
-        );
-
-        context.seats()
-                .stream()
-                .sorted()
-                .forEach(seat -> {
-
-                    log.debug(
-                            "Preparing Redis cancellation seat lock reservationId={} showId={} userId={} seat={}",
-                            reservationId,
-                            context.showId(),
-                            context.userId(),
-                            seat
-                    );
-
-                    locks.add(
-                            redissonClient.getLock(
-                                    "reservation:seat:"
-                                            + context.showId()
-                                            + ":"
-                                            + seat
-                            )
-                    );
-                });
-
-        log.debug(
-                "Creating Redis cancellation multi-lock reservationId={} showId={} userId={} seats={} lockCount={}",
-                reservationId,
-                context.showId(),
-                userId,
-                context.seats(),
-                locks.size()
-        );
-
-        RLock multiLock =
-                redissonClient.getMultiLock(
-                        locks.toArray(RLock[]::new)
-                );
-
+        RLock multiLock = redissonClient.getMultiLock(locks.toArray(RLock[]::new));
         boolean locked = false;
 
         try {
-
             try {
+                log.debug("Attempting bounded Redis cancellation lock reservationId={} showId={} userId={} seats={}", reservationId, context.showId(), userId, context.seats());
 
-                log.debug(
-                        "Attempting to acquire Redis cancellation lock reservationId={} showId={} userId={} seats={}",
-                        reservationId,
-                        context.showId(),
-                        userId,
-                        context.seats()
-                );
+                boolean acquired = multiLock.tryLock(500, 60_000, TimeUnit.MILLISECONDS);
 
-                multiLock.lock();
+                if (!acquired) {
+                    log.debug("Redis cancellation lock not acquired within wait period. Falling back to PostgreSQL reservationId={} userId={}", reservationId, userId);
+                    return transactionalService.cancel(reservationId, userId);
+                }
 
                 locked = true;
+                log.debug("Redis cancellation lock acquired reservationId={} showId={} userId={} seats={}", reservationId, context.showId(), userId, context.seats());
 
-                log.debug(
-                        "Redis cancellation lock acquired reservationId={} showId={} userId={} seats={}",
-                        reservationId,
-                        context.showId(),
-                        userId,
-                        context.seats()
-                );
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                log.warn("Redis cancellation lock wait interrupted. Falling back to PostgreSQL reservationId={} userId={}", reservationId, userId, exception);
+                return transactionalService.cancel(reservationId, userId);
 
             } catch (RedisException exception) {
-
-                log.warn(
-                        "Redis unavailable during cancellation. Falling back to PostgreSQL locking. reservationId={}",
-                        reservationId,
-                        exception
-                );
-
-                return transactionalService.cancel(
-                        reservationId,
-                        userId
-                );
+                log.warn("Redis unavailable during cancellation. Falling back to PostgreSQL locking. reservationId={} userId={}", reservationId, userId, exception);
+                return transactionalService.cancel(reservationId, userId);
             }
 
-            log.debug(
-                    "Executing transactional cancellation reservationId={} showId={} userId={} seats={}",
-                    reservationId,
-                    context.showId(),
-                    userId,
-                    context.seats()
-            );
-
-            return transactionalService.cancel(
-                    reservationId,
-                    userId
-            );
+            log.debug("Executing transactional cancellation reservationId={} showId={} userId={} seats={}", reservationId, context.showId(), userId, context.seats());
+            return transactionalService.cancel(reservationId, userId);
 
         } finally {
-
             if (locked) {
-
-                log.debug(
-                        "Checking Redis cancellation lock before release reservationId={} showId={} userId={}",
-                        reservationId,
-                        context.showId(),
-                        userId
-                );
-
                 try {
-
                     if (multiLock.isHeldByCurrentThread()) {
-
-                        log.debug(
-                                "Releasing Redis cancellation lock reservationId={} showId={} userId={} seats={}",
-                                reservationId,
-                                context.showId(),
-                                userId,
-                                context.seats()
-                        );
-
                         multiLock.unlock();
-
-                        log.debug(
-                                "Redis cancellation lock released reservationId={}",
-                                reservationId
-                        );
+                        log.debug("Redis cancellation lock released reservationId={}", reservationId);
                     }
-
                 } catch (RedisException exception) {
-
-                    log.error(
-                            "Failed to release Redis cancellation lock reservationId={}",
-                            reservationId,
-                            exception
-                    );
+                    log.error("Failed to release Redis cancellation lock reservationId={}", reservationId, exception);
                 }
             }
         }
