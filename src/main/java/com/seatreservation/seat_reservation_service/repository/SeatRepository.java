@@ -3,6 +3,7 @@ package com.seatreservation.seat_reservation_service.repository;
 
 import com.seatreservation.seat_reservation_service.entity.Seat;
 import com.seatreservation.seat_reservation_service.entity.SeatId;
+import com.seatreservation.seat_reservation_service.enums.SeatStatus;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -48,4 +49,6 @@ public interface SeatRepository extends JpaRepository<Seat, SeatId> {
             @Param("showId") UUID showId,
             @Param("seatNumbers") List<String> seatNumbers
     );
+
+    long countByStatus(SeatStatus status);
 }

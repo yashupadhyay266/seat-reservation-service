@@ -1,0 +1,211 @@
+import http from 'k6/http';
+import { Counter } from 'k6/metrics';
+
+const SHOW_ID = __ENV.SHOW_ID;
+const HOT_SEAT = __ENV.HOT_SEAT;
+
+const USER_COUNT =
+    Number(__ENV.USER_COUNT || 100);
+
+const BASE_URLS = [
+    'http://localhost:8080',
+    'http://localhost:8081'
+];
+
+const success201 =
+    new Counter('burst_201');
+
+const conflict409 =
+    new Counter('burst_409');
+
+const server5xx =
+    new Counter('burst_5xx');
+
+const networkErrors =
+    new Counter('burst_network_error');
+
+const unexpected =
+    new Counter('burst_unexpected');
+
+http.setResponseCallback(
+    http.expectedStatuses(200, 201, 409)
+);
+
+export const options = {
+
+    discardResponseBodies: true,
+
+    scenarios: {
+
+        burst20k: {
+
+            executor: 'shared-iterations',
+
+            vus: 500,
+
+            iterations: 20000,
+
+            maxDuration: '15m'
+        }
+    },
+
+    thresholds: {
+
+        burst_201: ['count==1'],
+
+        burst_409: ['count==19999'],
+
+        burst_5xx: ['count==0'],
+
+        burst_network_error: ['count==0'],
+
+        burst_unexpected: ['count==0']
+    }
+};
+
+export function setup() {
+
+    if (!SHOW_ID) {
+        throw new Error('SHOW_ID is required');
+    }
+
+    if (!HOT_SEAT) {
+        throw new Error('HOT_SEAT is required');
+    }
+
+    for (const baseUrl of BASE_URLS) {
+
+        const health =
+            http.get(
+                `${baseUrl}/actuator/health`,
+                {
+                    timeout: '10s'
+                }
+            );
+
+        if (health.status !== 200) {
+
+            throw new Error(
+                `Application unavailable ${baseUrl}`
+            );
+        }
+    }
+
+    const runId =
+        Date.now();
+
+    const tokens = [];
+
+    for (let i = 0; i < USER_COUNT; i++) {
+
+        const baseUrl =
+            BASE_URLS[i % BASE_URLS.length];
+
+        const username =
+            `burst_${runId}_${i}`;
+
+        const password =
+            'LoadTest@123';
+
+        const register =
+            http.post(
+                `${baseUrl}/auth/register`,
+                JSON.stringify({
+                    username,
+                    password
+                }),
+                {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: '30s'
+                }
+            );
+
+        if (register.status !== 201) {
+
+            throw new Error(
+                `Registration failed ${username}`
+            );
+        }
+
+        const login =
+            http.post(
+                `${baseUrl}/auth/login`,
+                JSON.stringify({
+                    username,
+                    password
+                }),
+                {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    responseType: 'text',
+                    timeout: '30s'
+                }
+            );
+
+        if (login.status !== 200) {
+
+            throw new Error(
+                `Login failed ${username}`
+            );
+        }
+
+        tokens.push(
+            login.json('access_token')
+        );
+    }
+
+    return {
+        runId,
+        tokens
+    };
+}
+
+export default function(data) {
+
+    const index =
+        (__VU + __ITER) % data.tokens.length;
+
+    const token =
+        data.tokens[index];
+
+    const baseUrl =
+        BASE_URLS[
+            (__VU + __ITER) %
+            BASE_URLS.length
+        ];
+
+    const response =
+        http.post(
+            `${baseUrl}/shows/${SHOW_ID}/reserve`,
+            JSON.stringify({
+                seats: [HOT_SEAT],
+                idempotency_key:
+                    `burst-${data.runId}-${__VU}-${__ITER}`
+            }),
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                timeout: '30s',
+                tags: {
+                    name: 'burst-20k'
+                }
+            }
+        );
+
+    if (response.status === 201) {
+        success201.add(1);
+    } else if (response.status === 409) {
+        conflict409.add(1);
+    } else if (response.status >= 500) {
+        server5xx.add(1);
+    } else if (response.status === 0) {
+        networkErrors.add(1);
+    } else {
+        unexpected.add(1);
+    }
+}
