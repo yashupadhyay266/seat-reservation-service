@@ -19,7 +19,8 @@ WORKDIR /app
 COPY --from=build /workspace/target/seat-reservation-service-0.0.1-SNAPSHOT.jar app.jar
 COPY docker/render-entrypoint.sh /app/render-entrypoint.sh
 
-RUN chmod +x /app/render-entrypoint.sh
+RUN sed -i 's/\r$//' /app/render-entrypoint.sh \
+    && chmod +x /app/render-entrypoint.sh
 
 EXPOSE 8080
 
