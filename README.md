@@ -1,3 +1,18 @@
+# Seat Reservation at Scale — Submission
+
+**Live URL:** https://seat-reservation-service-2kyt.onrender.com  
+**GitHub:** https://github.com/yashupadhyay266/seat-reservation-service  
+**Test evidence:** [RESULTS.md](RESULTS.md)  
+**Engineering write-up:** [WRITEUP.md](WRITEUP.md)
+
+### Key verified result
+
+> **500 simultaneous buyers targeting one fresh seat → 1 × 201, 499 × 409, 0 × 5xx.**
+
+Additional verified results include a 5,000-request hot-seat run with 0 5xx, a concurrent per-user-limit test (4 successes / 4 clean declines), 5,000 idempotent cancellation retries with 0 errors, and a Redis-down contention test that still produced exactly one winner.
+
+---
+
 # seat-reservation-service
 Seat reservation service - Build, deploy, and operate a small service that sells assigned seats for an event (a concert or a movie hall) and lets users reserve them. The whole challenge is correctness under load: you must never sell the same seat twice, never let a user exceed their booking limit, and never double-charge a retried request 
 ## Important Race Scenarios This Design Handles
