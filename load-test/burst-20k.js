@@ -7,10 +7,14 @@ const HOT_SEAT = __ENV.HOT_SEAT;
 const USER_COUNT =
     Number(__ENV.USER_COUNT || 100);
 
-const BASE_URLS = [
-    'http://localhost:8080',
-    'http://localhost:8081'
-];
+const BASE_URLS = (
+    __ENV.BASE_URLS ||
+    __ENV.BASE_URL ||
+    'http://localhost:8080,http://localhost:8081'
+)
+    .split(',')
+    .map(url => url.trim())
+    .filter(Boolean);
 
 const success201 =
     new Counter('burst_201');
@@ -32,6 +36,8 @@ http.setResponseCallback(
 );
 
 export const options = {
+
+    setupTimeout: '20m',
 
     discardResponseBodies: true,
 
@@ -77,9 +83,9 @@ export function setup() {
 
         const health =
             http.get(
-                `${baseUrl}/actuator/health`,
+                `${baseUrl}/actuator/health/readiness`,
                 {
-                    timeout: '10s'
+                    timeout: '240s'
                 }
             );
 
