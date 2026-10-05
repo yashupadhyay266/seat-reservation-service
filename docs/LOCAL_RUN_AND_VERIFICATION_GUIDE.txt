@@ -1,0 +1,63 @@
+SEAT RESERVATION SERVICE - LOCAL RUN & VERIFICATION GUIDE
+========================================================
+
+Purpose
+-------
+This guide is for a reviewer who has cloned the repository and wants to:
+
+1. Build the project from a clean checkout.
+2. Run the complete application locally.
+3. Verify PostgreSQL, Redis, Flyway, health probes, metrics and logs.
+4. Create users and an admin.
+5. Create fresh shows.
+6. Verify normal reservations, idempotency, cancellation and reconciliation.
+7. Reproduce the concurrency/load tests that were used during development.
+8. Verify the PostgreSQL correctness boundary even when Redis is unavailable.
+
+Repository:
+https://github.com/yashupadhyay266/seat-reservation-service
+
+Live URL:
+https://seat-reservation-service-2kyt.onrender.com
+
+See the downloadable copy shared in this chat for the complete step-by-step commands.
+
+Key local verification path:
+- mvn clean package -DskipTests
+- docker compose -f .\docker\docker-compose.full.yml up --build -d
+- verify postgres / redis / app1 / app2 / gateway
+- verify readiness, liveness, Prometheus and X-Request-ID
+- register a local user and promote it to ADMIN in local PostgreSQL
+- create fresh shows
+- run single reservation, idempotency, multi-seat, cancellation and rebooking checks
+- run hot-seat-500.js
+- run per-user-limit.js
+- run cancel-5000.js
+- optionally run burst-20k.js
+- stop Redis and repeat the hot-seat test to prove PostgreSQL correctness
+- run the SQL duplicate-seat verification query
+- inspect structured JSON logs and Prometheus metrics
+
+Previously verified locally:
+- clean Maven build: PASS
+- Docker image build/start: PASS
+- full Docker Compose stack: PASS
+- readiness/liveness: PASS
+- Flyway V1-V3: PASS
+- JWT registration/login: PASS
+- show creation: PASS
+- exact 500 hot-seat test: 1 x 201, 499 x 409, 0 x 5xx
+- optimized 5,000 hot-seat: 1 x 201, 4,999 x 409, 0 x 5xx
+- per-user limit: 4 x 201, 4 x 409
+- 5,000 cancellation retries: 5,000 x 200, 0 x 5xx
+- Redis-down hot-seat test: 1 x 201, 499 x 409, 0 x 5xx
+- duplicate confirmed-seat SQL query: 0 rows
+- structured JSON logs: PASS
+- request-id propagation: PASS
+- Prometheus metrics: PASS
+
+Correctness model:
+Redis = contention optimization.
+PostgreSQL = final correctness authority.
+
+For the full command-by-command version, use LOCAL_RUN_AND_VERIFICATION_GUIDE.txt attached with the submission package.
