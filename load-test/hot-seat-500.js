@@ -5,10 +5,14 @@ const SHOW_ID = __ENV.SHOW_ID;
 const HOT_SEAT = __ENV.HOT_SEAT;
 const USER_COUNT = Number(__ENV.USER_COUNT || 500);
 
-const BASE_URLS = [
-    'http://localhost:8080',
-    'http://localhost:8081'
-];
+const BASE_URLS = (
+    __ENV.BASE_URLS ||
+    __ENV.BASE_URL ||
+    'http://localhost:8080,http://localhost:8081'
+)
+    .split(',')
+    .map(url => url.trim())
+    .filter(Boolean);
 
 const success201 = new Counter('hot500_201');
 const conflict409 = new Counter('hot500_409');
@@ -21,7 +25,7 @@ http.setResponseCallback(
 );
 
 export const options = {
-    setupTimeout: '10m',
+    setupTimeout: '20m',
     discardResponseBodies: true,
 
     scenarios: {
@@ -54,7 +58,7 @@ export function setup() {
 
     for (const baseUrl of BASE_URLS) {
 
-        const health = http.get(`${baseUrl}/actuator/health/readiness`, { timeout: '10s' });
+        const health = http.get(`${baseUrl}/actuator/health/readiness`, { timeout: '240s' });
 
         if (health.status !== 200) {
             throw new Error(
