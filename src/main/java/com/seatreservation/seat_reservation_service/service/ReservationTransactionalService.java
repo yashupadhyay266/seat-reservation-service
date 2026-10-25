@@ -47,26 +47,13 @@ public class ReservationTransactionalService {
     @Transactional
     public ReservationResponse reserve(UUID showId, String userId, ReserveSeatRequest request) {
 
-        Show show = showRepository
-                .findById(showId)
-                .orElseThrow(ShowNotFoundException::new);
+        Show show = showRepository.findById(showId).orElseThrow(ShowNotFoundException::new);
 
         List<String> requestedSeats = normalizeSeats(request.seats());
         String requestHash = requestHasher.hash(showId, requestedSeats);
-        idempotencyRequestRepository.insertIfAbsent(
-                userId,
-                request.idempotencyKey(),
-                showId,
-                requestHash
-        );
+        idempotencyRequestRepository.insertIfAbsent(userId, request.idempotencyKey(), showId, requestHash);
 
-        IdempotencyRequest idempotency =
-                idempotencyRequestRepository
-                        .findForUpdate(
-                                userId,
-                                request.idempotencyKey()
-                        )
-                        .orElseThrow();
+        IdempotencyRequest idempotency = idempotencyRequestRepository.findForUpdate(userId, request.idempotencyKey()).orElseThrow();
 
         if (!idempotency.getRequestHash().equals(requestHash)) {
             throw new ReservationConflictException("IDEMPOTENCY_CONFLICT", "Idempotency key was already used with a different request");
@@ -76,18 +63,9 @@ public class ReservationTransactionalService {
             return buildExistingResponse(idempotency.getReservationId());
         }
 
-        userShowBookingRepository.insertIfAbsent(
-                showId,
-                userId
-        );
+        userShowBookingRepository.insertIfAbsent(showId, userId);
 
-        UserShowBooking userBooking =
-                userShowBookingRepository
-                        .findForUpdate(
-                                showId,
-                                userId
-                        )
-                        .orElseThrow();
+        UserShowBooking userBooking = userShowBookingRepository.findForUpdate(showId, userId).orElseThrow();
 
         if (userBooking.getConfirmedSeats() + requestedSeats.size() > show.getPerUserLimit()) {
             throw new ReservationConflictException("PER_USER_LIMIT", "Per-user seat limit exceeded");
@@ -102,258 +80,123 @@ public class ReservationTransactionalService {
 
         if (anySeatTaken) {
 
-            throw new ReservationConflictException(
-                    "SEAT_TAKEN",
-                    "One or more requested seats are already taken"
-            );
+            throw new ReservationConflictException("SEAT_TAKEN", "One or more requested seats are already taken");
         }
 
-        UUID reservationId =
-                UUID.randomUUID();
+        UUID reservationId = UUID.randomUUID();
 
-        long amountPaise =
-                Math.multiplyExact(
-                        show.getPricePaise(),
-                        requestedSeats.size()
-                );
+        long amountPaise = Math.multiplyExact(show.getPricePaise(), requestedSeats.size());
 
-        Reservation reservation =
-                new Reservation(
-                        reservationId,
-                        showId,
-                        userId,
-                        amountPaise
-                );
+        Reservation reservation = new Reservation(reservationId, showId, userId, amountPaise);
 
         reservationRepository.save(reservation);
 
         for (Seat seat : seats) {
 
-            seat.confirm(
-                    reservationId,
-                    userId
-            );
+            seat.confirm(reservationId, userId);
         }
 
-        List<ReservationSeat> reservationSeats =
-                requestedSeats.stream()
-                        .map(seatNo ->
-                                new ReservationSeat(
-                                        reservationId,
-                                        showId,
-                                        seatNo
-                                )
-                        )
-                        .toList();
+        List<ReservationSeat> reservationSeats = requestedSeats.stream().map(seatNo -> new ReservationSeat(reservationId, showId, seatNo)).toList();
 
-        reservationSeatRepository.saveAll(
-                reservationSeats
-        );
+        reservationSeatRepository.saveAll(reservationSeats);
 
-        userBooking.addSeats(
-                requestedSeats.size()
-        );
+        userBooking.addSeats(requestedSeats.size());
 
-        idempotency.complete(
-                reservationId,
-                201
-        );
+        idempotency.complete(reservationId, 201);
 
-        return new ReservationResponse(
-                reservationId,
-                showId,
-                userId,
-                requestedSeats,
-                amountPaise,
-                "confirmed"
-        );
+        return new ReservationResponse(reservationId, showId, userId, requestedSeats, amountPaise, "confirmed");
     }
 
     @Transactional
-    public ReservationResponse cancel(
-            UUID reservationId,
-            String authenticatedUserId
-    ) {
+    public ReservationResponse cancel(UUID reservationId, String authenticatedUserId) {
 
-        Reservation reservation =
-                reservationRepository
-                        .findForUpdate(reservationId)
-                        .orElseThrow(
-                                ReservationNotFoundException::new
-                        );
+        Reservation reservation = reservationRepository.findForUpdate(reservationId).orElseThrow(ReservationNotFoundException::new);
 
-        if (!reservation.getUserId()
-                .equals(authenticatedUserId)) {
+        if (!reservation.getUserId().equals(authenticatedUserId)) {
 
             throw new ReservationAccessDeniedException();
         }
 
-        List<String> reservedSeatNumbers =
-                reservationSeatRepository
-                        .findSeatNumbersByReservationId(
-                                reservationId
-                        )
-                        .stream()
-                        .sorted()
-                        .toList();
+        List<String> reservedSeatNumbers = reservationSeatRepository.findSeatNumbersByReservationId(reservationId).stream().sorted().toList();
 
         if (reservedSeatNumbers.isEmpty()) {
 
-            throw new ReservationStateException(
-                    "Reservation has no associated seats"
-            );
+            throw new ReservationStateException("Reservation has no associated seats");
         }
 
-        if (reservation.getStatus()
-                == ReservationStatus.CANCELLED) {
+        if (reservation.getStatus() == ReservationStatus.CANCELLED) {
 
-            return buildExistingResponse(
-                    reservationId
-            );
+            return buildExistingResponse(reservationId);
         }
 
-        if (reservation.getStatus()
-                != ReservationStatus.CONFIRMED) {
+        if (reservation.getStatus() != ReservationStatus.CONFIRMED) {
 
-            throw new ReservationStateException(
-                    "Reservation is not in a cancellable state"
-            );
+            throw new ReservationStateException("Reservation is not in a cancellable state");
         }
 
-        UserShowBooking userBooking =
-                userShowBookingRepository
-                        .findForUpdate(
-                                reservation.getShowId(),
-                                reservation.getUserId()
-                        )
-                        .orElseThrow(() ->
-                                new ReservationStateException(
-                                        "User booking counter does not exist"
-                                )
-                        );
+        UserShowBooking userBooking = userShowBookingRepository.findForUpdate(reservation.getShowId(), reservation.getUserId()).orElseThrow(() -> new ReservationStateException("User booking counter does not exist"));
 
-        if (userBooking.getConfirmedSeats()
-                < reservedSeatNumbers.size()) {
+        if (userBooking.getConfirmedSeats() < reservedSeatNumbers.size()) {
 
-            throw new ReservationStateException(
-                    "User booking counter is inconsistent"
-            );
+            throw new ReservationStateException("User booking counter is inconsistent");
         }
 
-        List<Seat> seats =
-                seatRepository.findSeatsForUpdate(
-                        reservation.getShowId(),
-                        reservedSeatNumbers
-                );
+        List<Seat> seats = seatRepository.findSeatsForUpdate(reservation.getShowId(), reservedSeatNumbers);
 
-        if (seats.size()
-                != reservedSeatNumbers.size()) {
+        if (seats.size() != reservedSeatNumbers.size()) {
 
-            throw new ReservationStateException(
-                    "Reservation seat state is inconsistent"
-            );
+            throw new ReservationStateException("Reservation seat state is inconsistent");
         }
 
         for (Seat seat : seats) {
 
-            if (seat.getStatus()
-                    != SeatStatus.CONFIRMED) {
+            if (seat.getStatus() != SeatStatus.CONFIRMED) {
 
-                throw new ReservationStateException(
-                        "Reservation contains a seat that is not confirmed"
-                );
+                throw new ReservationStateException("Reservation contains a seat that is not confirmed");
             }
 
-            if (!reservationId.equals(
-                    seat.getReservationId()
-            )) {
+            if (!reservationId.equals(seat.getReservationId())) {
 
-                throw new ReservationStateException(
-                        "Seat belongs to another reservation"
-                );
+                throw new ReservationStateException("Seat belongs to another reservation");
             }
 
-            if (!authenticatedUserId.equals(
-                    seat.getUserId()
-            )) {
+            if (!authenticatedUserId.equals(seat.getUserId())) {
 
-                throw new ReservationStateException(
-                        "Seat belongs to another user"
-                );
+                throw new ReservationStateException("Seat belongs to another user");
             }
         }
 
         for (Seat seat : seats) {
 
-            seat.release(
-                    reservationId,
-                    authenticatedUserId
-            );
+            seat.release(reservationId, authenticatedUserId);
         }
 
-        userBooking.removeSeats(
-                reservedSeatNumbers.size()
-        );
+        userBooking.removeSeats(reservedSeatNumbers.size());
 
         reservation.cancel();
 
-        return new ReservationResponse(
-                reservation.getId(),
-                reservation.getShowId(),
-                reservation.getUserId(),
-                reservedSeatNumbers,
-                reservation.getAmountPaise(),
-                "cancelled"
-        );
+        return new ReservationResponse(reservation.getId(), reservation.getShowId(), reservation.getUserId(), reservedSeatNumbers, reservation.getAmountPaise(), "cancelled");
     }
 
-    private List<String> normalizeSeats(
-            List<String> seats
-    ) {
+    private List<String> normalizeSeats(List<String> seats) {
 
-        List<String> normalized =
-                seats.stream()
-                        .map(String::trim)
-                        .sorted()
-                        .toList();
+        List<String> normalized = seats.stream().map(String::trim).sorted().toList();
 
-        if (
-                new HashSet<>(normalized).size()
-                        != normalized.size()
-        ) {
+        if (new HashSet<>(normalized).size() != normalized.size()) {
 
-            throw new InvalidSeatException(
-                    "Duplicate seats are not allowed"
-            );
+            throw new InvalidSeatException("Duplicate seats are not allowed");
         }
 
         return normalized;
     }
 
-    private ReservationResponse buildExistingResponse(
-            UUID reservationId
-    ) {
-
-        Reservation reservation =
-                reservationRepository
-                        .findById(reservationId)
-                        .orElseThrow();
-
-        List<String> seats =
-                reservationSeatRepository
-                        .findSeatNumbersByReservationId(
-                                reservationId
-                        );
-
-        return new ReservationResponse(
-                reservation.getId(),
-                reservation.getShowId(),
-                reservation.getUserId(),
+    private ReservationResponse buildExistingResponse(UUID reservationId) {
+        Reservation reservation = reservationRepository.findById(reservationId).orElseThrow();
+        List<String> seats = reservationSeatRepository.findSeatNumbersByReservationId(reservationId);
+        return new ReservationResponse(reservation.getId(),
+                reservation.getShowId(), reservation.getUserId(),
                 seats,
                 reservation.getAmountPaise(),
-                reservation.getStatus()
-                        .name()
-                        .toLowerCase()
-        );
+                reservation.getStatus().name().toLowerCase());
     }
 }
