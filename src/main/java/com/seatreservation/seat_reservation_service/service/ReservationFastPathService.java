@@ -22,17 +22,9 @@ public class ReservationFastPathService {
     private final IdempotencyRequestRepository idempotencyRequestRepository;
 
     @Transactional(readOnly = true)
-    public boolean canRejectImmediately(
-            UUID showId,
-            String userId,
-            ReserveSeatRequest request
-    ) {
+    public boolean canRejectImmediately(UUID showId, String userId, ReserveSeatRequest request) {
 
-        List<String> seatNumbers = request.seats()
-                .stream()
-                .map(String::trim)
-                .sorted()
-                .toList();
+        List<String> seatNumbers = request.seats().stream().map(String::trim).sorted().toList();
 
         if (seatNumbers.isEmpty()) {
             return false;
@@ -42,33 +34,19 @@ public class ReservationFastPathService {
             return false;
         }
 
-        List<Seat> seats =
-                seatRepository.findSeatsForFastCheck(
-                        showId,
-                        seatNumbers
-                );
+        List<Seat> seats = seatRepository.findSeatsForFastCheck(showId, seatNumbers);
 
         if (seats.size() != seatNumbers.size()) {
             return false;
         }
 
-        boolean allAvailable =
-                seats.stream()
-                        .allMatch(
-                                seat ->
-                                        seat.getStatus()
-                                                == SeatStatus.AVAILABLE
-                        );
+        boolean allAvailable = seats.stream().allMatch(seat -> seat.getStatus() == SeatStatus.AVAILABLE);
 
         if (allAvailable) {
             return false;
         }
 
-        IdempotencyRequestId id =
-                new IdempotencyRequestId(
-                        userId,
-                        request.idempotencyKey()
-                );
+        IdempotencyRequestId id = new IdempotencyRequestId(userId, request.idempotencyKey());
 
         boolean existingIdempotencyRequest = idempotencyRequestRepository.existsById(id);
         return !existingIdempotencyRequest;

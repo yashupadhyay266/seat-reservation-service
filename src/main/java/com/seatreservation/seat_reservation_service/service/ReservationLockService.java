@@ -28,303 +28,103 @@ public class ReservationLockService {
     private final ReservationLookupService reservationLookupService;
     private final ReservationFastPathService reservationFastPathService;
 
-    public ReservationResponse reserve(
-            UUID showId,
-            String userId,
-            ReserveSeatRequest request
-    ) {
+    public ReservationResponse reserve(UUID showId, String userId, ReserveSeatRequest request) {
 
-        log.debug(
-                "Reservation request received showId={} userId={} seats={} idempotencyKey={}",
-                showId,
-                userId,
-                request.seats(),
-                request.idempotencyKey()
-        );
-
-        log.debug(
-                "Checking reservation fast path showId={} userId={} seats={}",
-                showId,
-                userId,
-                request.seats()
-        );
+        log.debug("Reservation request received showId={} userId={} seats={} idempotencyKey={}", showId, userId, request.seats(), request.idempotencyKey());
+        log.debug("Checking reservation fast path showId={} userId={} seats={}", showId, userId, request.seats());
 
         if (reservationFastPathService.canRejectImmediately(showId, userId, request)) {
-
-            log.debug(
-                    "Reservation rejected by fast path because one or more seats are unavailable showId={} userId={} seats={}",
-                    showId,
-                    userId,
-                    request.seats()
-            );
-
-            throw new SeatUnavailableException(
-                    "One or more requested seats are no longer available"
-            );
+            log.debug("Reservation rejected by fast path because one or more seats are unavailable showId={} userId={} seats={}", showId, userId, request.seats());
+            throw new SeatUnavailableException("One or more requested seats are no longer available");
         }
 
-        log.debug(
-                "Reservation passed fast path showId={} userId={} seats={}",
-                showId,
-                userId,
-                request.seats()
-        );
+        log.debug("Reservation passed fast path showId={} userId={} seats={}", showId, userId, request.seats());
 
-        List<String> seats = request.seats()
-                .stream()
-                .map(String::trim)
-                .sorted()
-                .toList();
-
-        log.debug(
-                "Reservation seats normalized and sorted showId={} userId={} seats={}",
-                showId,
-                userId,
-                seats
-        );
+        List<String> seats = request.seats().stream().map(String::trim).sorted().toList();
+        log.debug("Reservation seats normalized and sorted showId={} userId={} seats={}", showId, userId, seats);
 
         if (new HashSet<>(seats).size() != seats.size()) {
-
-            log.debug(
-                    "Reservation rejected because duplicate seats were requested showId={} userId={} seats={}",
-                    showId,
-                    userId,
-                    seats
-            );
-
-            throw new InvalidSeatException(
-                    "Duplicate seats are not allowed"
-            );
+            log.debug("Reservation rejected because duplicate seats were requested showId={} userId={} seats={}", showId, userId, seats);
+            throw new InvalidSeatException("Duplicate seats are not allowed");
         }
 
         List<RLock> locks = new ArrayList<>();
+        log.debug("Preparing Redis idempotency lock showId={} userId={} idempotencyKey={}", showId, userId, request.idempotencyKey());
 
-        log.debug(
-                "Preparing Redis idempotency lock showId={} userId={} idempotencyKey={}",
-                showId,
-                userId,
-                request.idempotencyKey()
-        );
+        locks.add(redissonClient.getLock("reservation:idempotency:" + userId + ":" + request.idempotencyKey()));
+        log.debug("Preparing Redis user lock showId={} userId={}", showId, userId);
 
-        locks.add(
-                redissonClient.getLock(
-                        "reservation:idempotency:"
-                                + userId
-                                + ":"
-                                + request.idempotencyKey()
-                )
-        );
-
-        log.debug(
-                "Preparing Redis user lock showId={} userId={}",
-                showId,
-                userId
-        );
-
-        locks.add(
-                redissonClient.getLock(
-                        "reservation:user:"
-                                + showId
-                                + ":"
-                                + userId
-                )
-        );
-
+        locks.add(redissonClient.getLock("reservation:user:" + showId + ":" + userId));
         for (String seat : seats) {
+            log.debug("Preparing Redis seat lock showId={} userId={} seat={}", showId, userId, seat);
 
-            log.debug(
-                    "Preparing Redis seat lock showId={} userId={} seat={}",
-                    showId,
-                    userId,
-                    seat
-            );
-
-            locks.add(
-                    redissonClient.getLock(
-                            "reservation:seat:"
-                                    + showId
-                                    + ":"
-                                    + seat
-                    )
-            );
+            locks.add(redissonClient.getLock("reservation:seat:" + showId + ":" + seat));
         }
 
-        log.debug(
-                "Creating Redis multi-lock showId={} userId={} seats={} lockCount={}",
-                showId,
-                userId,
-                seats,
-                locks.size()
-        );
+        log.debug("Creating Redis multi-lock showId={} userId={} seats={} lockCount={}", showId, userId, seats, locks.size());
 
-        RLock multiLock =
-                redissonClient.getMultiLock(
-                        locks.toArray(RLock[]::new)
-                );
+        RLock multiLock = redissonClient.getMultiLock(locks.toArray(RLock[]::new));
 
         boolean locked = false;
 
         try {
-
             try {
+                log.debug("Attempting bounded Redis reservation lock showId={} userId={} seats={}", showId, userId, seats);
 
-                log.debug(
-                        "Attempting bounded Redis reservation lock showId={} userId={} seats={}",
-                        showId,
-                        userId,
-                        seats
-                );
-
-                boolean acquired =
-                        multiLock.tryLock(
-                                500,
-                                60_000,
-                                TimeUnit.MILLISECONDS
-                        );
+                boolean acquired = multiLock.tryLock(500, 60_000, TimeUnit.MILLISECONDS);
 
                 if (!acquired) {
+                    log.debug("Redis reservation lock not acquired within wait period showId={} userId={} seats={}", showId, userId, seats);
 
-                    log.debug(
-                            "Redis reservation lock not acquired within wait period showId={} userId={} seats={}",
-                            showId,
-                            userId,
-                            seats
-                    );
+                    log.debug("Rechecking fast path after Redis contention showId={} userId={} seats={}", showId, userId, seats);
 
-                    log.debug(
-                            "Rechecking fast path after Redis contention showId={} userId={} seats={}",
-                            showId,
-                            userId,
-                            seats
-                    );
+                    if (reservationFastPathService.canRejectImmediately(showId, userId, request)) {
+                        log.debug("Reservation rejected after Redis contention because seat is now unavailable showId={} userId={} seats={}", showId, userId, seats);
 
-                    if (reservationFastPathService.canRejectImmediately(
-                            showId,
-                            userId,
-                            request
-                    )) {
-
-                        log.debug(
-                                "Reservation rejected after Redis contention because seat is now unavailable showId={} userId={} seats={}",
-                                showId,
-                                userId,
-                                seats
-                        );
-
-                        throw new SeatUnavailableException(
-                                "One or more requested seats are no longer available"
-                        );
+                        throw new SeatUnavailableException("One or more requested seats are no longer available");
                     }
 
-                    log.debug(
-                            "Seat still appears available after Redis contention. Falling back to PostgreSQL locking showId={} userId={} seats={}",
-                            showId,
-                            userId,
-                            seats
-                    );
+                    log.debug("Seat still appears available after Redis contention. Falling back to PostgreSQL locking showId={} userId={} seats={}", showId, userId, seats);
 
-                    return transactionalService.reserve(
-                            showId,
-                            userId,
-                            request
-                    );
+                    return transactionalService.reserve(showId, userId, request);
                 }
 
                 locked = true;
 
-                log.debug(
-                        "Redis reservation lock acquired showId={} userId={} seats={}",
-                        showId,
-                        userId,
-                        seats
-                );
+                log.debug("Redis reservation lock acquired showId={} userId={} seats={}", showId, userId, seats);
 
             } catch (InterruptedException exception) {
-
                 Thread.currentThread().interrupt();
 
-                log.warn(
-                        "Redis reservation lock wait interrupted. Falling back to PostgreSQL locking. showId={} userId={}",
-                        showId,
-                        userId,
-                        exception
-                );
+                log.warn("Redis reservation lock wait interrupted. Falling back to PostgreSQL locking. showId={} userId={}", showId, userId, exception);
 
-                return transactionalService.reserve(
-                        showId,
-                        userId,
-                        request
-                );
+                return transactionalService.reserve(showId, userId, request);
 
             } catch (RedisException exception) {
+                log.warn("Redis locking unavailable. Falling back to PostgreSQL locking. showId={} userId={}", showId, userId, exception);
 
-                log.warn(
-                        "Redis locking unavailable. Falling back to PostgreSQL locking. showId={} userId={}",
-                        showId,
-                        userId,
-                        exception
-                );
-
-                return transactionalService.reserve(
-                        showId,
-                        userId,
-                        request
-                );
+                return transactionalService.reserve(showId, userId, request);
             }
 
-            log.debug(
-                    "Executing transactional reservation showId={} userId={} seats={}",
-                    showId,
-                    userId,
-                    seats
-            );
+            log.debug("Executing transactional reservation showId={} userId={} seats={}", showId, userId, seats);
 
-            return transactionalService.reserve(
-                    showId,
-                    userId,
-                    request
-            );
+            return transactionalService.reserve(showId, userId, request);
 
         } finally {
-
             if (locked) {
-
-                log.debug(
-                        "Checking Redis reservation lock before release showId={} userId={} seats={}",
-                        showId,
-                        userId,
-                        seats
-                );
+                log.debug("Checking Redis reservation lock before release showId={} userId={} seats={}", showId, userId, seats);
 
                 try {
-
                     if (multiLock.isHeldByCurrentThread()) {
-
-                        log.debug(
-                                "Releasing Redis reservation lock showId={} userId={} seats={}",
-                                showId,
-                                userId,
-                                seats
-                        );
+                        log.debug("Releasing Redis reservation lock showId={} userId={} seats={}", showId, userId, seats);
 
                         multiLock.unlock();
 
-                        log.debug(
-                                "Redis reservation lock released showId={} userId={} seats={}",
-                                showId,
-                                userId,
-                                seats
-                        );
+                        log.debug("Redis reservation lock released showId={} userId={} seats={}", showId, userId, seats);
                     }
 
                 } catch (RedisException exception) {
-
-                    log.error(
-                            "Failed to release Redis reservation lock. showId={} userId={}",
-                            showId,
-                            userId,
-                            exception
-                    );
+                    log.error("Failed to release Redis reservation lock. showId={} userId={}", showId, userId, exception);
                 }
             }
         }
