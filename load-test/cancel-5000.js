@@ -6,7 +6,15 @@ const USERNAME = __ENV.USERNAME;
 const PASSWORD = __ENV.PASSWORD || 'LoadTest@123';
 const TOTAL_REQUESTS = Number(__ENV.TOTAL_REQUESTS || 5000);
 const VUS = Number(__ENV.VUS || 100);
-const BASE_URLS = ['http://localhost:8080', 'http://localhost:8081'];
+
+const BASE_URLS = (
+    __ENV.BASE_URLS ||
+    __ENV.BASE_URL ||
+    'http://localhost:8080,http://localhost:8081'
+)
+    .split(',')
+    .map(url => url.trim())
+    .filter(Boolean);
 
 const success200 = new Counter('cancellation_200');
 const unauthorized401 = new Counter('cancellation_401');
@@ -20,8 +28,16 @@ const unexpected = new Counter('cancellation_unexpected');
 http.setResponseCallback(http.expectedStatuses(200));
 
 export const options = {
+    setupTimeout: '20m',
     discardResponseBodies: true,
-    scenarios: { cancellation_load: { executor: 'shared-iterations', vus: VUS, iterations: TOTAL_REQUESTS, maxDuration: '30m' } },
+    scenarios: {
+        cancellation_load: {
+            executor: 'shared-iterations',
+            vus: VUS,
+            iterations: TOTAL_REQUESTS,
+            maxDuration: '30m'
+        }
+    },
     thresholds: {
         cancellation_401: ['count==0'],
         cancellation_403: ['count==0'],
@@ -37,15 +53,13 @@ export function setup() {
     if (!RESERVATION_ID) throw new Error('RESERVATION_ID is required');
     if (!USERNAME) throw new Error('USERNAME is required');
 
-    for (const baseUrl of BASE_URLS) {
-        const health = http.get(`${baseUrl}/actuator/health`, { timeout: '10s' });
-        if (health.status !== 200) throw new Error(`Application unavailable: ${baseUrl}`);
-    }
+    const health = http.get(`${BASE_URLS[0]}/actuator/health/readiness`, { timeout: '240s' });
+    if (health.status !== 200) throw new Error(`Application unavailable: ${BASE_URLS[0]}`);
 
     const login = http.post(`${BASE_URLS[0]}/auth/login`, JSON.stringify({ username: USERNAME, password: PASSWORD }), {
         headers: { 'Content-Type': 'application/json' },
         responseType: 'text',
-        timeout: '30s'
+        timeout: '60s'
     });
 
     if (login.status !== 200) throw new Error(`Login failed status=${login.status} body=${login.body}`);

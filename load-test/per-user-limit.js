@@ -9,10 +9,14 @@ const SEATS =
         .map(seat => seat.trim())
         .filter(Boolean);
 
-const BASE_URLS = [
-    'http://localhost:8080',
-    'http://localhost:8081'
-];
+const BASE_URLS = (
+    __ENV.BASE_URLS ||
+    __ENV.BASE_URL ||
+    'http://localhost:8080,http://localhost:8081'
+)
+    .split(',')
+    .map(url => url.trim())
+    .filter(Boolean);
 
 const success201 =
     new Counter('limit_201');
@@ -35,6 +39,8 @@ http.setResponseCallback(
 
 export const options = {
 
+    setupTimeout: '20m',
+
     discardResponseBodies: true,
 
     scenarios: {
@@ -47,7 +53,7 @@ export const options = {
 
             iterations: 1,
 
-            maxDuration: '2m'
+            maxDuration: '5m'
         }
     },
 
@@ -71,6 +77,12 @@ export function setup() {
         throw new Error('SHOW_ID is required');
     }
 
+    const health = http.get(`${BASE_URLS[0]}/actuator/health/readiness`, { timeout: '240s' });
+
+    if (health.status !== 200) {
+        throw new Error(`Application unavailable: ${BASE_URLS[0]}`);
+    }
+
     const runId =
         Date.now();
 
@@ -91,7 +103,7 @@ export function setup() {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                timeout: '30s'
+                timeout: '60s'
             }
         );
 
@@ -114,7 +126,7 @@ export function setup() {
                     'Content-Type': 'application/json'
                 },
                 responseType: 'text',
-                timeout: '30s'
+                timeout: '60s'
             }
         );
 
@@ -164,7 +176,7 @@ export default function(data) {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${data.token}`
                 },
-                timeout: '30s',
+                timeout: '60s',
                 tags: {
                     name: 'per-user-limit'
                 }

@@ -1,0 +1,410 @@
+SEAT RESERVATION SERVICE - LOAD TESTING & VERIFICATION GUIDE
+================================================================
+
+Project
+-------
+GitHub:
+https://github.com/yashupadhyay266/seat-reservation-service
+
+Live service:
+https://seat-reservation-service-2kyt.onrender.com
+
+1. PREREQUISITES
+================
+
+Install:
+- Git
+- Java 21
+- Maven 3.9+
+- Docker Desktop
+- k6
+- PowerShell
+
+Verify:
+
+git --version
+java -version
+mvn -version
+docker --version
+docker compose version
+k6 version
+
+2. CLONE THE REPOSITORY
+=======================
+
+git clone https://github.com/yashupadhyay266/seat-reservation-service.git
+cd seat-reservation-service
+
+3. BUILD VERIFICATION
+=====================
+
+mvn clean package -DskipTests
+
+Expected:
+BUILD SUCCESS
+
+4. VERIFY THE LIVE DEPLOYMENT
+=============================
+
+$liveUrl = "https://seat-reservation-service-2kyt.onrender.com"
+
+Invoke-RestMethod -Uri "$liveUrl/actuator/health/readiness" -TimeoutSec 240
+Invoke-RestMethod -Uri "$liveUrl/actuator/health/liveness" -TimeoutSec 240
+(Invoke-WebRequest -Uri "$liveUrl/actuator/prometheus" -TimeoutSec 240).StatusCode
+
+Expected:
+readiness = UP
+liveness = UP
+Prometheus HTTP status = 200
+
+Request-ID propagation:
+
+$response = Invoke-WebRequest -Uri "$liveUrl/actuator/health/readiness" -Headers @{"X-Request-ID"="verification-test-001"} -TimeoutSec 240
+$response.Headers["X-Request-ID"]
+
+Expected:
+verification-test-001
+
+NOTE:
+The free Render instance may sleep when idle. The first request can take longer than normal, so a 240-second timeout is intentionally used.
+
+5. OPTIONAL LOCAL DOCKER VERIFICATION
+=====================================
+
+$env:JWT_SECRET="replace-this-with-a-long-random-secret-at-least-32-bytes"
+
+docker compose -f .\docker\docker-compose.full.yml up --build -d
+docker compose -f .\docker\docker-compose.full.yml ps
+
+Invoke-RestMethod "http://localhost/actuator/health/readiness"
+(Invoke-WebRequest "http://localhost/actuator/prometheus").StatusCode
+
+Stop:
+
+docker compose -f .\docker\docker-compose.full.yml down
+
+6. TEST DATA REQUIRED
+=====================
+
+Reservation load tests require a fresh show and fresh seats.
+
+Recommended test show:
+
+{
+  "name": "load-test-show",
+  "seats": ["A12","L1","L2","L3","L4","L5","L6","L7","L8"],
+  "price_paise": 25000
+}
+
+POST /shows requires an ADMIN JWT.
+
+Admin login:
+
+$adminLogin = Invoke-RestMethod -Uri "$liveUrl/auth/login" -Method POST -ContentType "application/json" -Body (@{
+    username = "ADMIN_USERNAME"
+    password = "ADMIN_PASSWORD"
+} | ConvertTo-Json) -TimeoutSec 240
+
+$adminToken = $adminLogin.access_token
+
+Create show:
+
+$show = Invoke-RestMethod -Uri "$liveUrl/shows" -Method POST -Headers @{Authorization="Bearer $adminToken"} -ContentType "application/json" -Body (@{
+    name = "load-test-show"
+    seats = @("A12","L1","L2","L3","L4","L5","L6","L7","L8")
+    price_paise = 25000
+} | ConvertTo-Json) -TimeoutSec 240
+
+$showId = $show.id
+$showId
+
+IMPORTANT:
+Always use a fresh show / fresh hot seat for a new hot-seat test.
+
+7. REGISTER AND LOGIN NORMAL USER
+=================================
+
+$suffix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$username = "verify_user_$suffix"
+$password = "LoadTest@123"
+
+Invoke-RestMethod -Uri "$liveUrl/auth/register" -Method POST -ContentType "application/json" -Body (@{
+    username = $username
+    password = $password
+} | ConvertTo-Json) -TimeoutSec 240
+
+$login = Invoke-RestMethod -Uri "$liveUrl/auth/login" -Method POST -ContentType "application/json" -Body (@{
+    username = $username
+    password = $password
+} | ConvertTo-Json) -TimeoutSec 240
+
+$token = $login.access_token
+
+8. BASIC RESERVATION TEST
+=========================
+
+$reservation = Invoke-RestMethod -Uri "$liveUrl/shows/$showId/reserve" -Method POST -Headers @{Authorization="Bearer $token"} -ContentType "application/json" -Body (@{
+    seats = @("L1")
+    idempotency_key = "single-$suffix"
+} | ConvertTo-Json)
+
+$reservation
+
+Expected:
+HTTP 201
+status = CONFIRMED
+
+9. IDEMPOTENCY TEST
+===================
+
+Repeat the same request with the same idempotency key.
+
+Expected:
+Original reservation is returned.
+No second reservation is created.
+
+Then use the same idempotency key with different seats.
+
+Expected:
+HTTP 409
+
+10. SHOW RECONCILIATION
+=======================
+
+Invoke-RestMethod -Uri "$liveUrl/shows/$showId" -TimeoutSec 240 | ConvertTo-Json -Depth 10
+
+Verify:
+available + held + confirmed = total_seats
+
+This implementation uses explicit cancellation, so:
+held = 0
+
+11. LOAD TEST FILES
+===================
+
+load-test/hot-seat-500.js
+load-test/per-user-limit.js
+load-test/burst-20k.js
+load-test/cancel-5000.js
+load-test/hot-seat-200k.js
+
+12. EXACT 500-USER HOT-SEAT TEST
+================================
+
+Use a NEW show containing a fresh A12.
+
+k6 run `
+    -e BASE_URL="https://seat-reservation-service-2kyt.onrender.com" `
+    -e SHOW_ID="$showId" `
+    -e HOT_SEAT="A12" `
+    -e USER_COUNT=500 `
+    .\load-test\hot-seat-500.js
+
+Target:
+
+hot500_201             = 1
+hot500_409             = 499
+hot500_5xx             = 0
+hot500_network_error   = 0
+hot500_unexpected      = 0
+
+Previously verified:
+1 x 201
+499 x 409
+0 x 5xx
+0 network errors
+
+13. PER-USER LIMIT TEST
+=======================
+
+The show must have fresh seats:
+L1,L2,L3,L4,L5,L6,L7,L8
+
+k6 run `
+    -e BASE_URL="https://seat-reservation-service-2kyt.onrender.com" `
+    -e SHOW_ID="$showId" `
+    -e SEATS="L1,L2,L3,L4,L5,L6,L7,L8" `
+    .\load-test\per-user-limit.js
+
+Target:
+
+limit_201           = 4
+limit_409           = 4
+limit_5xx           = 0
+limit_network_error = 0
+limit_unexpected    = 0
+
+Previously verified:
+4 x 201
+4 x 409
+0 x 5xx
+
+14. 20,000-REQUEST BURST
+========================
+
+Use a NEW show and a fresh hot seat.
+
+k6 run `
+    -e BASE_URL="https://seat-reservation-service-2kyt.onrender.com" `
+    -e SHOW_ID="$showId" `
+    -e HOT_SEAT="A12" `
+    -e USER_COUNT=100 `
+    .\load-test\burst-20k.js
+
+Target:
+
+burst_201           = 1
+burst_409           = 19999
+burst_5xx           = 0
+burst_network_error = 0
+burst_unexpected    = 0
+
+NOTE:
+The public deployment uses a free-tier Render instance. Platform CPU/network limits can affect throughput and latency measurements.
+
+15. CANCELLATION LOAD SETUP
+===========================
+
+Create a fresh normal user and reserve a fresh seat.
+
+$suffix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$cancelUser = "cancel_user_$suffix"
+$cancelPassword = "LoadTest@123"
+
+Invoke-RestMethod -Uri "$liveUrl/auth/register" -Method POST -ContentType "application/json" -Body (@{
+    username = $cancelUser
+    password = $cancelPassword
+} | ConvertTo-Json)
+
+$cancelLogin = Invoke-RestMethod -Uri "$liveUrl/auth/login" -Method POST -ContentType "application/json" -Body (@{
+    username = $cancelUser
+    password = $cancelPassword
+} | ConvertTo-Json)
+
+$cancelToken = $cancelLogin.access_token
+
+$res = Invoke-RestMethod -Uri "$liveUrl/shows/$showId/reserve" -Method POST -Headers @{Authorization="Bearer $cancelToken"} -ContentType "application/json" -Body (@{
+    seats = @("L1")
+    idempotency_key = "cancel-setup-$suffix"
+} | ConvertTo-Json)
+
+$reservationId = $res.reservation_id
+
+16. 5,000 CANCELLATION RETRIES
+==============================
+
+k6 run `
+    -e BASE_URL="https://seat-reservation-service-2kyt.onrender.com" `
+    -e RESERVATION_ID="$reservationId" `
+    -e USERNAME="$cancelUser" `
+    -e PASSWORD="$cancelPassword" `
+    -e TOTAL_REQUESTS=5000 `
+    -e VUS=100 `
+    .\load-test\cancel-5000.js
+
+Target:
+
+cancellation_200           = 5000
+cancellation_401           = 0
+cancellation_403           = 0
+cancellation_404           = 0
+cancellation_409           = 0
+cancellation_5xx           = 0
+cancellation_network_error = 0
+cancellation_unexpected    = 0
+
+Previously verified:
+5000 x 200
+0 x 5xx
+0 network errors
+~67.1 requests/sec
+p95 ~2.34 sec
+
+17. VERIFY SHOW AFTER LOAD
+==========================
+
+Invoke-RestMethod -Uri "$liveUrl/shows/$showId" -TimeoutSec 240 | ConvertTo-Json -Depth 10
+
+Verify:
+- no double-selling
+- available + held + confirmed = total_seats
+- held = 0
+
+18. VERIFY PROMETHEUS AFTER LOAD
+================================
+
+$metrics = Invoke-WebRequest -Uri "$liveUrl/actuator/prometheus" -TimeoutSec 240
+
+$metrics.StatusCode
+$metrics.Content | Select-String "seat_reservation"
+$metrics.Content | Select-String "seat_cancellation"
+
+Custom metrics include:
+
+seat_reservation_requests_total
+seat_reservation_responses_total
+seat_reservation_duration_seconds
+seat_cancellation_requests_total
+seat_cancellation_responses_total
+seat_cancellation_duration_seconds
+
+19. PREVIOUSLY VERIFIED RESULTS
+===============================
+
+Exact 500 hot-seat:
+1 x 201
+499 x 409
+0 x 5xx
+0 network errors
+
+Optimized 5,000 hot-seat:
+1 x 201
+4,999 x 409
+0 x 5xx
+0 network errors
+~113.7 attempts/sec
+p95 ~1.5 sec
+
+Per-user limit:
+4 x 201
+4 x 409
+0 x 5xx
+
+5,000 cancellation retries:
+5,000 x 200
+0 x 5xx
+0 network errors
+~67.1 requests/sec
+p95 ~2.34 sec
+
+Redis-down hot-seat test:
+1 x 201
+499 x 409
+0 x 5xx
+
+Database duplicate-confirmation verification:
+0 duplicate confirmed seats
+
+20. CORRECTNESS MODEL
+=====================
+
+Redis = contention optimization
+PostgreSQL = final correctness authority
+
+The successful reservation decision is made inside a PostgreSQL transaction using pessimistic locking and revalidation.
+
+Multi-seat reservations are all-or-nothing.
+Per-user counters are transactionally locked.
+Idempotency is stored in PostgreSQL.
+Normal contention declines return HTTP 409 rather than HTTP 500.
+
+21. ADDITIONAL DOCUMENTATION
+============================
+
+README.md
+WRITEUP.md
+RESULTS.md
+docs/DEPLOYMENT.md
+
+END OF GUIDE
+============
