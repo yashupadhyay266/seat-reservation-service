@@ -11,7 +11,7 @@ import com.seatreservation.seat_reservation_service.service.ReservationLockServi
 import com.seatreservation.seat_reservation_service.service.ShowService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.tool.ToolContext;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
