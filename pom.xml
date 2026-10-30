@@ -45,8 +45,26 @@
 
 		<redisson.version>4.8.0</redisson.version>
 
+		<spring-ai.version>2.0.2</spring-ai.version>
+
 	</properties>
 
+
+	<!-- ===================================================== -->
+	<!-- Spring AI Dependency Management                       -->
+	<!-- ===================================================== -->
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.ai</groupId>
+				<artifactId>spring-ai-bom</artifactId>
+				<version>${spring-ai.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
 
 	<!-- ===================================================== -->
 	<!-- Dependencies                                          -->
@@ -143,6 +161,15 @@
 			<artifactId>spring-boot-starter-actuator</artifactId>
 		</dependency>
 
+
+		<!-- ================================================= -->
+		<!-- Spring AI / OpenAI Agent                          -->
+		<!-- ================================================= -->
+
+		<dependency>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-starter-model-openai</artifactId>
+		</dependency>
 
 		<!-- ================================================= -->
 		<!-- Prometheus Metrics                                -->

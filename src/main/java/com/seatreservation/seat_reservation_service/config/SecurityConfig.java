@@ -31,6 +31,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/shows/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/shows/*/reserve").authenticated()
                         .requestMatchers("/reservations/**").authenticated()
+                        .requestMatchers("/assistant/**").authenticated()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter)))
                 .httpBasic(AbstractHttpConfigurer::disable)
